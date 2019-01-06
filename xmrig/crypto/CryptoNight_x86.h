@@ -50,6 +50,9 @@ extern "C"
 #include "crypto/c_skein.h"
 }
 
+#define U64(x) ((uint64_t *) (x))
+#define R128(x) ((__m128i *) (x))
+#define state_index(x) (((*((uint64_t *)x) >> 4) & (65535)) << 4)
 
 static inline void do_blake_hash(const uint8_t *input, size_t len, uint8_t *output) {
     blake256_hash(output, input, len);
@@ -453,108 +456,49 @@ static inline void cryptonight_monero_tweak(uint64_t* mem_out, const uint8_t* l,
 template<xmrig::Algo ALGO, bool SOFT_AES, xmrig::Variant VARIANT>
 inline void cryptonight_single_hash(const uint8_t *__restrict__ input, size_t size, uint8_t *__restrict__ output, cryptonight_ctx **__restrict__ ctx)
 {
-    constexpr size_t MASK       = xmrig::cn_select_mask<ALGO>();
-    constexpr size_t ITERATIONS = xmrig::cn_select_iter<ALGO, VARIANT>();
-    constexpr size_t MEM        = xmrig::cn_select_memory<ALGO>();
-    constexpr bool IS_V1        = xmrig::cn_base_variant<VARIANT>() == xmrig::VARIANT_1;
-
-    if (IS_V1 && size < 43) {
-        memset(output, 0, 32);
-        return;
-    }
 
     xmrig::keccak(input, size, ctx[0]->state);
 
-    cn_explode_scratchpad<ALGO, MEM, SOFT_AES>((__m128i*) ctx[0]->state, (__m128i*) ctx[0]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[0]->state, (__m128i*) ctx[0]->memory);
 
     const uint8_t* l0 = ctx[0]->memory;
     uint64_t* h0 = reinterpret_cast<uint64_t*>(ctx[0]->state);
 
-    VARIANT1_INIT(0);
-    VARIANT2_INIT(0);
-    VARIANT2_SET_ROUNDING_MODE();
-
+    uint64_t c[2], c1[2]; 
     uint64_t al0 = h0[0] ^ h0[4];
     uint64_t ah0 = h0[1] ^ h0[5];
-    __m128i bx0 = _mm_set_epi64x(h0[3] ^ h0[7], h0[2] ^ h0[6]);
-    __m128i bx1 = _mm_set_epi64x(h0[9] ^ h0[11], h0[8] ^ h0[10]);
 
     uint64_t idx0 = al0;
+    size_t ptr0;
 
-    for (size_t i = 0; i < ITERATIONS; i++) {
-        __m128i cx;
-        if (VARIANT == xmrig::VARIANT_TUBE || !SOFT_AES) {
-            cx = _mm_load_si128((__m128i *) &l0[idx0 & MASK]);
-        }
-
-        const __m128i ax0 = _mm_set_epi64x(ah0, al0);
-        if (VARIANT == xmrig::VARIANT_TUBE) {
-            cx = aes_round_tweak_div(cx, ax0);
-        }
-        else if (SOFT_AES) {
-            cx = soft_aesenc((uint32_t*)&l0[idx0 & MASK], ax0);
-        }
-        else {  
-            cx = _mm_aesenc_si128(cx, ax0);
-        }
-
-        if (IS_V1 || VARIANT == xmrig::VARIANT_2) {
-            cryptonight_monero_tweak<VARIANT>((uint64_t*)&l0[idx0 & MASK], l0, idx0 & MASK, ax0, bx0, bx1, cx);
-        } else {
-            _mm_store_si128((__m128i *)&l0[idx0 & MASK], _mm_xor_si128(bx0, cx));
-        }
-
-        idx0 = _mm_cvtsi128_si64(cx);
-
-        uint64_t hi, lo, cl, ch;
-        cl = ((uint64_t*) &l0[idx0 & MASK])[0];
-        ch = ((uint64_t*) &l0[idx0 & MASK])[1];
-        if (VARIANT == xmrig::VARIANT_2) {
-            VARIANT2_INTEGER_MATH(0, cl, cx);
-            lo = __umul128(idx0, cl, &hi);
-            VARIANT2_SHUFFLE2(l0, idx0 & MASK, ax0, bx0, bx1, hi, lo);
-        }
-        else {
-            lo = __umul128(idx0, cl, &hi);
-        }
-
-        al0 += hi;
-        ah0 += lo;
-
-        ((uint64_t*)&l0[idx0 & MASK])[0] = al0;
-
-        if (IS_V1 && (VARIANT == xmrig::VARIANT_TUBE || VARIANT == xmrig::VARIANT_RTO)) {
-            ((uint64_t*)&l0[idx0 & MASK])[1] = ah0 ^ tweak1_2_0 ^ al0;
-        } else if (IS_V1) {
-            ((uint64_t*)&l0[idx0 & MASK])[1] = ah0 ^ tweak1_2_0;
-        } else {
-            ((uint64_t*)&l0[idx0 & MASK])[1] = ah0;
-        }
-
-        al0 ^= cl;
-        ah0 ^= ch;
+    for(size_t i = 0; i < 0x200000; i++)
+    {
+        __m128i cx; 
+        __m128i ax0 = _mm_set_epi64x(ah0, al0);
+        ptr0 = state_index(l0[idx0 & 0x1FFFF0]);
+        cx = _mm_load_si128((__m128i *) &l0[idx0 & 0x1FFFF0]);
+        cx= SOFT_AES?soft_aesenc(cx, ax0):_mm_aesenc_si128(cx, ax0); 
+        _mm_store_si128(R128(c), cx);  
+        _mm_store_si128(R128(c1), _mm_load_si128(R128(ptr0))); 
+        ptr0 = state_index(c); 
+        c[0] ^= al0; c[1] ^= ah0; 
+        _mm_store_si128((__m128i *)ptr0,_mm_load_si128(R128(c))); 
+        ptr0 = state_index(c);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(c1))); 
+        c1[0] ^= c[0]; c1[1] ^= c[1];
+        ptr0 = state_index(c1);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(c1))); 
+        uint64_t cl, ch;
+        cl = ((uint64_t*)ptr0)[0]; 
+        ch = ((uint64_t*)ptr0)[1];
+        ((uint64_t*)ptr0)[0] = al0; 
+        ((uint64_t*)ptr0)[1] = ah0; 
+        al0 ^= cl; 
+        ah0 ^= ch; 
+        ax0 = _mm_set_epi64x(ah0, al0); 
         idx0 = al0;
-
-        if (ALGO == xmrig::CRYPTONIGHT_HEAVY) {
-            int64_t n = ((int64_t*)&l0[idx0 & MASK])[0];
-            int32_t d = ((int32_t*)&l0[idx0 & MASK])[2];
-            int64_t q = n / (d | 0x5);
-
-            ((int64_t*)&l0[idx0 & MASK])[0] = n ^ q;
-
-            if (VARIANT == xmrig::VARIANT_XHV) {
-                d = ~d;
-            }
-
-            idx0 = d ^ q;
-        }
-        if (VARIANT == xmrig::VARIANT_2) {
-            bx1 = bx0;
-        }
-        bx0 = cx;
     }
-
-    cn_implode_scratchpad<ALGO, MEM, SOFT_AES>((__m128i*) ctx[0]->memory, (__m128i*) ctx[0]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l0, (__m128i*) ctx[0]->state);
 
     xmrig::keccakf(h0, 24);
     extra_hashes[ctx[0]->state[0] & 3](ctx[0]->state, 200, output);
@@ -591,18 +535,17 @@ inline void cryptonight_single_hash_asm(const uint8_t *__restrict__ input, size_
 template<xmrig::Algo ALGO, xmrig::Variant VARIANT, xmrig::Assembly ASM>
 inline void cryptonight_double_hash_asm(const uint8_t *__restrict__ input, size_t size, uint8_t *__restrict__ output, cryptonight_ctx **__restrict__ ctx)
 {
-    constexpr size_t MEM = xmrig::cn_select_memory<ALGO>();
 
     xmrig::keccak(input,        size, ctx[0]->state);
     xmrig::keccak(input + size, size, ctx[1]->state);
 
-    cn_explode_scratchpad<ALGO, MEM, false>(reinterpret_cast<__m128i*>(ctx[0]->state), reinterpret_cast<__m128i*>(ctx[0]->memory));
-    cn_explode_scratchpad<ALGO, MEM, false>(reinterpret_cast<__m128i*>(ctx[1]->state), reinterpret_cast<__m128i*>(ctx[1]->memory));
+    cn_explode_scratchpad<ALGO, 2097152, false>(reinterpret_cast<__m128i*>(ctx[0]->state), reinterpret_cast<__m128i*>(ctx[0]->memory));
+    cn_explode_scratchpad<ALGO, 2097152, false>(reinterpret_cast<__m128i*>(ctx[1]->state), reinterpret_cast<__m128i*>(ctx[1]->memory));
 
     cnv2_double_mainloop_sandybridge_asm(ctx[0], ctx[1]);
 
-    cn_implode_scratchpad<ALGO, MEM, false>(reinterpret_cast<__m128i*>(ctx[0]->memory), reinterpret_cast<__m128i*>(ctx[0]->state));
-    cn_implode_scratchpad<ALGO, MEM, false>(reinterpret_cast<__m128i*>(ctx[1]->memory), reinterpret_cast<__m128i*>(ctx[1]->state));
+    cn_implode_scratchpad<ALGO, 2097152, false>(reinterpret_cast<__m128i*>(ctx[0]->memory), reinterpret_cast<__m128i*>(ctx[0]->state));
+    cn_implode_scratchpad<ALGO, 2097152, false>(reinterpret_cast<__m128i*>(ctx[1]->memory), reinterpret_cast<__m128i*>(ctx[1]->state));
 
     xmrig::keccakf(reinterpret_cast<uint64_t*>(ctx[0]->state), 24);
     xmrig::keccakf(reinterpret_cast<uint64_t*>(ctx[1]->state), 24);
@@ -616,179 +559,89 @@ inline void cryptonight_double_hash_asm(const uint8_t *__restrict__ input, size_
 template<xmrig::Algo ALGO, bool SOFT_AES, xmrig::Variant VARIANT>
 inline void cryptonight_double_hash(const uint8_t *__restrict__ input, size_t size, uint8_t *__restrict__ output, cryptonight_ctx **__restrict__ ctx)
 {
-    constexpr size_t MASK       = xmrig::cn_select_mask<ALGO>();
-    constexpr size_t ITERATIONS = xmrig::cn_select_iter<ALGO, VARIANT>();
-    constexpr size_t MEM        = xmrig::cn_select_memory<ALGO>();
-    constexpr bool IS_V1        = xmrig::cn_base_variant<VARIANT>() == xmrig::VARIANT_1;
+    xmrig::keccak(input, size, ctx[0]->state);
+    xmrig::keccak(input+size, size, ctx[1]->state);
 
-    if (IS_V1 && size < 43) {
-        memset(output, 0, 64);
-        return;
-    }
-
-    xmrig::keccak(input,        size, ctx[0]->state);
-    xmrig::keccak(input + size, size, ctx[1]->state);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[0]->state, (__m128i*) ctx[0]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[1]->state, (__m128i*) ctx[1]->memory);
 
     const uint8_t* l0 = ctx[0]->memory;
     const uint8_t* l1 = ctx[1]->memory;
     uint64_t* h0 = reinterpret_cast<uint64_t*>(ctx[0]->state);
     uint64_t* h1 = reinterpret_cast<uint64_t*>(ctx[1]->state);
 
-    VARIANT1_INIT(0);
-    VARIANT1_INIT(1);
-    VARIANT2_INIT(0);
-    VARIANT2_INIT(1);
-    VARIANT2_SET_ROUNDING_MODE();
-
-    cn_explode_scratchpad<ALGO, MEM, SOFT_AES>((__m128i*) h0, (__m128i*) l0);
-    cn_explode_scratchpad<ALGO, MEM, SOFT_AES>((__m128i*) h1, (__m128i*) l1);
-
+    uint64_t ca[2], ca1[2]; 
+    uint64_t cb[2], cb1[2]; 
     uint64_t al0 = h0[0] ^ h0[4];
-    uint64_t al1 = h1[0] ^ h1[4];
     uint64_t ah0 = h0[1] ^ h0[5];
+    uint64_t al1 = h1[0] ^ h1[4];
     uint64_t ah1 = h1[1] ^ h1[5];
-
-    __m128i bx00 = _mm_set_epi64x(h0[3] ^ h0[7], h0[2] ^ h0[6]);
-    __m128i bx01 = _mm_set_epi64x(h0[9] ^ h0[11], h0[8] ^ h0[10]);
-    __m128i bx10 = _mm_set_epi64x(h1[3] ^ h1[7], h1[2] ^ h1[6]);
-    __m128i bx11 = _mm_set_epi64x(h1[9] ^ h1[11], h1[8] ^ h1[10]);
 
     uint64_t idx0 = al0;
     uint64_t idx1 = al1;
+    size_t ptr0;
+    size_t ptr1;
 
-    for (size_t i = 0; i < ITERATIONS; i++) {
-        __m128i cx0, cx1;
-        if (VARIANT == xmrig::VARIANT_TUBE || !SOFT_AES) {
-            cx0 = _mm_load_si128((__m128i *) &l0[idx0 & MASK]);
-            cx1 = _mm_load_si128((__m128i *) &l1[idx1 & MASK]);
-        }
+    for(size_t i = 0; i < 0x200000; i++)
+    {
+        __m128i cx;
+        __m128i cx1; 
+        __m128i ax0 = _mm_set_epi64x(ah0, al0);
+        __m128i ax1 = _mm_set_epi64x(ah1, al1);
+        ptr0 = state_index(l0[idx0 & 0x1FFFF0]);
+        ptr1 = state_index(l1[idx1 & 0x1FFFF0]);
+        cx = _mm_load_si128((__m128i *) &l0[idx0 & 0x1FFFF0]);
+        cx1 = _mm_load_si128((__m128i *) &l1[idx1 & 0x1FFFF0]);
+        cx= SOFT_AES?soft_aesenc(cx, ax0):_mm_aesenc_si128(cx, ax0); 
+        cx1= SOFT_AES?soft_aesenc(cx1, ax1):_mm_aesenc_si128(cx1, ax1); 
 
-        const __m128i ax0 = _mm_set_epi64x(ah0, al0);
-        const __m128i ax1 = _mm_set_epi64x(ah1, al1);
-        if (VARIANT == xmrig::VARIANT_TUBE) {
-            cx0 = aes_round_tweak_div(cx0, ax0);
-            cx1 = aes_round_tweak_div(cx1, ax1);
-        }
-        else if (SOFT_AES) {
-            cx0 = soft_aesenc((uint32_t*)&l0[idx0 & MASK], ax0);
-            cx1 = soft_aesenc((uint32_t*)&l1[idx1 & MASK], ax1);
-        }
-        else {
-            cx0 = _mm_aesenc_si128(cx0, ax0);
-            cx1 = _mm_aesenc_si128(cx1, ax1);
-        }
-
-        if (IS_V1 || (VARIANT == xmrig::VARIANT_2)) {
-            cryptonight_monero_tweak<VARIANT>((uint64_t*)&l0[idx0 & MASK], l0, idx0 & MASK, ax0, bx00, bx01, cx0);
-            cryptonight_monero_tweak<VARIANT>((uint64_t*)&l1[idx1 & MASK], l1, idx1 & MASK, ax1, bx10, bx11, cx1);
-        } else {
-            _mm_store_si128((__m128i *) &l0[idx0 & MASK], _mm_xor_si128(bx00, cx0));
-            _mm_store_si128((__m128i *) &l1[idx1 & MASK], _mm_xor_si128(bx10, cx1));
-        }
-
-        idx0 = _mm_cvtsi128_si64(cx0);
-        idx1 = _mm_cvtsi128_si64(cx1);
-
-        uint64_t hi, lo, cl, ch;
-        cl = ((uint64_t*) &l0[idx0 & MASK])[0];
-        ch = ((uint64_t*) &l0[idx0 & MASK])[1];
-        if (VARIANT == xmrig::VARIANT_2) {
-            VARIANT2_INTEGER_MATH(0, cl, cx0);
-            lo = __umul128(idx0, cl, &hi);
-            VARIANT2_SHUFFLE2(l0, idx0 & MASK, ax0, bx00, bx01, hi, lo);
-        } else {
-            lo = __umul128(idx0, cl, &hi);
-        }
-
-        al0 += hi;
-        ah0 += lo;
-
-        ((uint64_t*)&l0[idx0 & MASK])[0] = al0;
-
-        if (IS_V1 && (VARIANT == xmrig::VARIANT_TUBE || VARIANT == xmrig::VARIANT_RTO)) {
-            ((uint64_t*) &l0[idx0 & MASK])[1] = ah0 ^ tweak1_2_0 ^ al0;
-        } else if (IS_V1) {
-            ((uint64_t*) &l0[idx0 & MASK])[1] = ah0 ^ tweak1_2_0;
-        } else {
-            ((uint64_t*) &l0[idx0 & MASK])[1] = ah0;
-        }
-
-        al0 ^= cl;
-        ah0 ^= ch;
+        _mm_store_si128(R128(ca), cx);  
+        _mm_store_si128(R128(cb), cx1);  
+        _mm_store_si128(R128(ca1), _mm_load_si128(R128(ptr0))); 
+        _mm_store_si128(R128(cb1), _mm_load_si128(R128(ptr1))); 
+        ptr0 = state_index(ca); 
+        ptr1 = state_index(cb); 
+        ca[0] ^= al0; ca[1] ^= ah0; 
+        cb[0] ^= al1; cb[1] ^= ah1; 
+        _mm_store_si128((__m128i *)ptr0,_mm_load_si128(R128(ca))); 
+        _mm_store_si128((__m128i *)ptr1,_mm_load_si128(R128(cb))); 
+        ptr0 = state_index(ca);
+        ptr1 = state_index(cb);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1)));
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        ca1[0] ^= ca[0]; ca1[1] ^= ca[1];
+        cb1[0] ^= cb[0]; cb1[1] ^= cb[1];
+        ptr0 = state_index(ca1);
+        ptr1 = state_index(cb1);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1))); 
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        uint64_t cl0, ch0;
+        uint64_t cl1, ch1;
+        cl0 = ((uint64_t*)ptr0)[0];  
+        cl1 = ((uint64_t*)ptr1)[0]; 
+        ch0 = ((uint64_t*)ptr0)[1];
+        ch1 = ((uint64_t*)ptr1)[1];
+        ((uint64_t*)ptr0)[0] = al0; 
+        ((uint64_t*)ptr1)[0] = al1; 
+        ((uint64_t*)ptr0)[1] = ah0; 
+        ((uint64_t*)ptr1)[1] = ah1; 
+        al0 ^= cl0;  
+        al1 ^= cl1; 
+        ah0 ^= ch0; 
+        ah1 ^= ch1; 
+        ax0 = _mm_set_epi64x(ah0, al0); 
+        ax1 = _mm_set_epi64x(ah1, al1); 
         idx0 = al0;
-
-        if (ALGO == xmrig::CRYPTONIGHT_HEAVY) {
-            int64_t n = ((int64_t*)&l0[idx0 & MASK])[0];
-            int32_t d = ((int32_t*)&l0[idx0 & MASK])[2];
-            int64_t q = n / (d | 0x5);
-
-            ((int64_t*)&l0[idx0 & MASK])[0] = n ^ q;
-
-            if (VARIANT == xmrig::VARIANT_XHV) {
-                d = ~d;
-            }
-
-            idx0 = d ^ q;
-        }
-
-        cl = ((uint64_t*) &l1[idx1 & MASK])[0];
-        ch = ((uint64_t*) &l1[idx1 & MASK])[1];
-        if (VARIANT == xmrig::VARIANT_2) {
-            VARIANT2_INTEGER_MATH(1, cl, cx1);
-            lo = __umul128(idx1, cl, &hi);
-            VARIANT2_SHUFFLE2(l1, idx1 & MASK, ax1, bx10, bx11, hi, lo);
-        } else {
-            lo = __umul128(idx1, cl, &hi);
-        }
-
-        al1 += hi;
-        ah1 += lo;
-
-        ((uint64_t*)&l1[idx1 & MASK])[0] = al1;
-
-        if (IS_V1 && (VARIANT == xmrig::VARIANT_TUBE || VARIANT == xmrig::VARIANT_RTO)) {
-            ((uint64_t*)&l1[idx1 & MASK])[1] = ah1 ^ tweak1_2_1 ^ al1;
-        } else if (IS_V1) {
-            ((uint64_t*)&l1[idx1 & MASK])[1] = ah1 ^ tweak1_2_1;
-        } else {
-            ((uint64_t*)&l1[idx1 & MASK])[1] = ah1;
-        }
-
-        al1 ^= cl;
-        ah1 ^= ch;
         idx1 = al1;
-
-        if (ALGO == xmrig::CRYPTONIGHT_HEAVY) {
-            int64_t n = ((int64_t*)&l1[idx1 & MASK])[0];
-            int32_t d = ((int32_t*)&l1[idx1 & MASK])[2];
-            int64_t q = n / (d | 0x5);
-
-            ((int64_t*)&l1[idx1 & MASK])[0] = n ^ q;
-
-            if (VARIANT == xmrig::VARIANT_XHV) {
-                d = ~d;
-            }
-
-            idx1 = d ^ q;
-        }
-
-        if (VARIANT == xmrig::VARIANT_2) {
-            bx01 = bx00;
-            bx11 = bx10;
-        }
-        bx00 = cx0;
-        bx10 = cx1;
     }
-
-    cn_implode_scratchpad<ALGO, MEM, SOFT_AES>((__m128i*) l0, (__m128i*) h0);
-    cn_implode_scratchpad<ALGO, MEM, SOFT_AES>((__m128i*) l1, (__m128i*) h1);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l0, (__m128i*) ctx[0]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l1, (__m128i*) ctx[1]->state);
 
     xmrig::keccakf(h0, 24);
     xmrig::keccakf(h1, 24);
-
     extra_hashes[ctx[0]->state[0] & 3](ctx[0]->state, 200, output);
-    extra_hashes[ctx[1]->state[0] & 3](ctx[1]->state, 200, output + 32);
-}
+    extra_hashes[ctx[1]->state[0] & 3](ctx[1]->state, 200, output+32);
+}	
 
 
 #define CN_STEP1(a, b0, b1, c, l, ptr, idx)           \
@@ -882,218 +735,478 @@ inline void cryptonight_double_hash(const uint8_t *__restrict__ input, size_t si
 template<xmrig::Algo ALGO, bool SOFT_AES, xmrig::Variant VARIANT>
 inline void cryptonight_triple_hash(const uint8_t *__restrict__ input, size_t size, uint8_t *__restrict__ output, cryptonight_ctx **__restrict__ ctx)
 {
-    constexpr size_t MASK       = xmrig::cn_select_mask<ALGO>();
-    constexpr size_t ITERATIONS = xmrig::cn_select_iter<ALGO, VARIANT>();
-    constexpr size_t MEM        = xmrig::cn_select_memory<ALGO>();
-    constexpr bool IS_V1        = xmrig::cn_base_variant<VARIANT>() == xmrig::VARIANT_1;
+    xmrig::keccak(input       , size, ctx[0]->state);
+    xmrig::keccak(input+  size, size, ctx[1]->state);
+    xmrig::keccak(input+2*size, size, ctx[2]->state);
 
-    if (IS_V1 && size < 43) {
-        memset(output, 0, 32 * 3);
-        return;
-    }
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[0]->state, (__m128i*) ctx[0]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[1]->state, (__m128i*) ctx[1]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[2]->state, (__m128i*) ctx[2]->memory);
 
-    for (size_t i = 0; i < 3; i++) {
-        xmrig::keccak(input + size * i, size, ctx[i]->state);
-        cn_explode_scratchpad<ALGO, MEM, SOFT_AES>(reinterpret_cast<__m128i*>(ctx[i]->state), reinterpret_cast<__m128i*>(ctx[i]->memory));
-    }
-
-    uint8_t* l0  = ctx[0]->memory;
-    uint8_t* l1  = ctx[1]->memory;
-    uint8_t* l2  = ctx[2]->memory;
+    const uint8_t* l0 = ctx[0]->memory;
+    const uint8_t* l1 = ctx[1]->memory;
+    const uint8_t* l2 = ctx[2]->memory;
     uint64_t* h0 = reinterpret_cast<uint64_t*>(ctx[0]->state);
     uint64_t* h1 = reinterpret_cast<uint64_t*>(ctx[1]->state);
     uint64_t* h2 = reinterpret_cast<uint64_t*>(ctx[2]->state);
 
-    CONST_INIT(ctx[0], 0);
-    CONST_INIT(ctx[1], 1);
-    CONST_INIT(ctx[2], 2);
-    VARIANT2_SET_ROUNDING_MODE();
+    uint64_t ca[2], ca1[2]; 
+    uint64_t cb[2], cb1[2]; 
+    uint64_t cc[2], cc1[2]; 
+    uint64_t al0 = h0[0] ^ h0[4];
+    uint64_t ah0 = h0[1] ^ h0[5];
+    uint64_t al1 = h1[0] ^ h1[4];
+    uint64_t ah1 = h1[1] ^ h1[5];
+    uint64_t al2 = h2[0] ^ h2[4];
+    uint64_t ah2 = h2[1] ^ h2[5];
 
-    uint64_t idx0, idx1, idx2;
-    idx0 = _mm_cvtsi128_si64(ax0);
-    idx1 = _mm_cvtsi128_si64(ax1);
-    idx2 = _mm_cvtsi128_si64(ax2);
+    uint64_t idx0 = al0;
+    uint64_t idx1 = al1;
+    uint64_t idx2 = al2;
+    size_t ptr0;
+    size_t ptr1;
+    size_t ptr2;
 
-    for (size_t i = 0; i < ITERATIONS; i++) {
-        uint64_t hi, lo;
-        __m128i *ptr0, *ptr1, *ptr2;
+    for(size_t i = 0; i < 0x200000; i++)
+    {
+        __m128i cx;
+        __m128i cx1; 
+        __m128i cx2; 
+        __m128i ax0 = _mm_set_epi64x(ah0, al0);
+        __m128i ax1 = _mm_set_epi64x(ah1, al1);
+        __m128i ax2 = _mm_set_epi64x(ah2, al2);
+        ptr0 = state_index(l0[idx0 & 0x1FFFF0]);
+        ptr1 = state_index(l1[idx1 & 0x1FFFF0]);
+        ptr2 = state_index(l2[idx2 & 0x1FFFF0]);
+        cx  = _mm_load_si128((__m128i *)  &l0[idx0 & 0x1FFFF0]);
+        cx1 = _mm_load_si128((__m128i *)  &l1[idx1 & 0x1FFFF0]);
+        cx2 = _mm_load_si128((__m128i *)  &l2[idx2 & 0x1FFFF0]);
+        cx  = SOFT_AES?soft_aesenc(cx,  ax0):_mm_aesenc_si128(cx,  ax0); 
+        cx1 = SOFT_AES?soft_aesenc(cx1, ax1):_mm_aesenc_si128(cx1, ax1); 
+        cx2 = SOFT_AES?soft_aesenc(cx2, ax2):_mm_aesenc_si128(cx2, ax2); 
 
-        CN_STEP1(ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP1(ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP1(ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-
-        CN_STEP2(ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP2(ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP2(ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-
-        CN_STEP3(0, ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP3(1, ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP3(2, ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-
-        CN_STEP4(0, ax0, bx00, bx01, cx0, l0, mc0, ptr0, idx0);
-        CN_STEP4(1, ax1, bx10, bx11, cx1, l1, mc1, ptr1, idx1);
-        CN_STEP4(2, ax2, bx20, bx21, cx2, l2, mc2, ptr2, idx2);
+        _mm_store_si128(R128(ca), cx);  
+        _mm_store_si128(R128(cb), cx1);  
+        _mm_store_si128(R128(cc), cx2);  
+        _mm_store_si128(R128(ca1), _mm_load_si128(R128(ptr0))); 
+        _mm_store_si128(R128(cb1), _mm_load_si128(R128(ptr1))); 
+        _mm_store_si128(R128(cc1), _mm_load_si128(R128(ptr2))); 
+        ptr0 = state_index(ca); 
+        ptr1 = state_index(cb); 
+        ptr2 = state_index(cc); 
+        ca[0] ^= al0; ca[1] ^= ah0; 
+        cb[0] ^= al1; cb[1] ^= ah1; 
+        cc[0] ^= al2; cc[1] ^= ah2; 
+        _mm_store_si128((__m128i *)ptr0,_mm_load_si128(R128(ca))); 
+        _mm_store_si128((__m128i *)ptr1,_mm_load_si128(R128(cb))); 
+        _mm_store_si128((__m128i *)ptr2,_mm_load_si128(R128(cc))); 
+        ptr0 = state_index(ca);
+        ptr1 = state_index(cb);
+        ptr2 = state_index(cc);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1)));
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr2, _mm_load_si128(R128(cc1))); 
+        ca1[0] ^= ca[0]; ca1[1] ^= ca[1];
+        cb1[0] ^= cb[0]; cb1[1] ^= cb[1];
+        cc1[0] ^= cc[0]; cc1[1] ^= cc[1];
+        ptr0 = state_index(ca1);
+        ptr1 = state_index(cb1);
+        ptr2 = state_index(cc1);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1))); 
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr2, _mm_load_si128(R128(cc1))); 
+        uint64_t cl0, ch0;
+        uint64_t cl1, ch1;
+        uint64_t cl2, ch2;
+        cl0 = ((uint64_t*)ptr0)[0];  
+        cl1 = ((uint64_t*)ptr1)[0];  
+        cl2 = ((uint64_t*)ptr2)[0]; 
+        ch0 = ((uint64_t*)ptr0)[1];
+        ch1 = ((uint64_t*)ptr1)[1];
+        ch2 = ((uint64_t*)ptr2)[1];
+        ((uint64_t*)ptr0)[0] = al0; 
+        ((uint64_t*)ptr1)[0] = al1; 
+        ((uint64_t*)ptr2)[0] = al2; 
+        ((uint64_t*)ptr0)[1] = ah0; 
+        ((uint64_t*)ptr1)[1] = ah1; 
+        ((uint64_t*)ptr2)[1] = ah2; 
+        al0 ^= cl0;  
+        al1 ^= cl1; 
+        al2 ^= cl2; 
+        ah0 ^= ch0; 
+        ah1 ^= ch1; 
+        ah2 ^= ch2; 
+        ax0 = _mm_set_epi64x(ah0, al0); 
+        ax1 = _mm_set_epi64x(ah1, al1);
+        ax2 = _mm_set_epi64x(ah2, al2); 
+        idx0 = al0;
+        idx1 = al1;
+        idx2 = al2;
     }
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l0, (__m128i*) ctx[0]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l1, (__m128i*) ctx[1]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l2, (__m128i*) ctx[2]->state);
 
-    for (size_t i = 0; i < 3; i++) {
-        cn_implode_scratchpad<ALGO, MEM, SOFT_AES>(reinterpret_cast<__m128i*>(ctx[i]->memory), reinterpret_cast<__m128i*>(ctx[i]->state));
-        xmrig::keccakf(reinterpret_cast<uint64_t*>(ctx[i]->state), 24);
-        extra_hashes[ctx[i]->state[0] & 3](ctx[i]->state, 200, output + 32 * i);
-    }
+    xmrig::keccakf(h0, 24);
+    xmrig::keccakf(h1, 24);
+    xmrig::keccakf(h2, 24);
+    extra_hashes[ctx[0]->state[0] & 3](ctx[0]->state, 200, output);
+    extra_hashes[ctx[1]->state[0] & 3](ctx[1]->state, 200, output+32);
+    extra_hashes[ctx[2]->state[0] & 3](ctx[2]->state, 200, output+64);
 }
 
 
 template<xmrig::Algo ALGO, bool SOFT_AES, xmrig::Variant VARIANT>
 inline void cryptonight_quad_hash(const uint8_t *__restrict__ input, size_t size, uint8_t *__restrict__ output, cryptonight_ctx **__restrict__ ctx)
 {
-    constexpr size_t MASK       = xmrig::cn_select_mask<ALGO>();
-    constexpr size_t ITERATIONS = xmrig::cn_select_iter<ALGO, VARIANT>();
-    constexpr size_t MEM        = xmrig::cn_select_memory<ALGO>();
-    constexpr bool IS_V1        = xmrig::cn_base_variant<VARIANT>() == xmrig::VARIANT_1;;
+    xmrig::keccak(input       , size, ctx[0]->state);
+    xmrig::keccak(input+  size, size, ctx[1]->state);
+    xmrig::keccak(input+2*size, size, ctx[2]->state);
+    xmrig::keccak(input+3*size, size, ctx[3]->state);
 
-    if (IS_V1 && size < 43) {
-        memset(output, 0, 32 * 4);
-        return;
-    }
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[0]->state, (__m128i*) ctx[0]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[1]->state, (__m128i*) ctx[1]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[2]->state, (__m128i*) ctx[2]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[3]->state, (__m128i*) ctx[3]->memory);
 
-    for (size_t i = 0; i < 4; i++) {
-        xmrig::keccak(input + size * i, size, ctx[i]->state);
-        cn_explode_scratchpad<ALGO, MEM, SOFT_AES>(reinterpret_cast<__m128i*>(ctx[i]->state), reinterpret_cast<__m128i*>(ctx[i]->memory));
-    }
-
-    uint8_t* l0  = ctx[0]->memory;
-    uint8_t* l1  = ctx[1]->memory;
-    uint8_t* l2  = ctx[2]->memory;
-    uint8_t* l3  = ctx[3]->memory;
+    const uint8_t* l0 = ctx[0]->memory;
+    const uint8_t* l1 = ctx[1]->memory;
+    const uint8_t* l2 = ctx[2]->memory;
+    const uint8_t* l3 = ctx[3]->memory;
     uint64_t* h0 = reinterpret_cast<uint64_t*>(ctx[0]->state);
     uint64_t* h1 = reinterpret_cast<uint64_t*>(ctx[1]->state);
     uint64_t* h2 = reinterpret_cast<uint64_t*>(ctx[2]->state);
     uint64_t* h3 = reinterpret_cast<uint64_t*>(ctx[3]->state);
 
-    CONST_INIT(ctx[0], 0);
-    CONST_INIT(ctx[1], 1);
-    CONST_INIT(ctx[2], 2);
-    CONST_INIT(ctx[3], 3);
-    VARIANT2_SET_ROUNDING_MODE();
+    uint64_t ca[2], ca1[2]; 
+    uint64_t cb[2], cb1[2]; 
+    uint64_t cc[2], cc1[2]; 
+    uint64_t cd[2], cd1[2]; 
+    uint64_t al0 = h0[0] ^ h0[4];
+    uint64_t ah0 = h0[1] ^ h0[5];
+    uint64_t al1 = h1[0] ^ h1[4];
+    uint64_t ah1 = h1[1] ^ h1[5];
+    uint64_t al2 = h2[0] ^ h2[4];
+    uint64_t ah2 = h2[1] ^ h2[5];
+    uint64_t al3 = h3[0] ^ h3[4];
+    uint64_t ah3 = h3[1] ^ h3[5];
 
-    uint64_t idx0, idx1, idx2, idx3;
-    idx0 = _mm_cvtsi128_si64(ax0);
-    idx1 = _mm_cvtsi128_si64(ax1);
-    idx2 = _mm_cvtsi128_si64(ax2);
-    idx3 = _mm_cvtsi128_si64(ax3);
+    uint64_t idx0 = al0;
+    uint64_t idx1 = al1;
+    uint64_t idx2 = al2;
+    uint64_t idx3 = al3;
+    size_t ptr0;
+    size_t ptr1;
+    size_t ptr2;
+    size_t ptr3;
 
-    for (size_t i = 0; i < ITERATIONS; i++)
+    for(size_t i = 0; i < 0x200000; i++)
     {
-        uint64_t hi, lo;
-        __m128i *ptr0, *ptr1, *ptr2, *ptr3;
-
-        CN_STEP1(ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP1(ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP1(ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-        CN_STEP1(ax3, bx30, bx31, cx3, l3, ptr3, idx3);
-
-        CN_STEP2(ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP2(ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP2(ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-        CN_STEP2(ax3, bx30, bx31, cx3, l3, ptr3, idx3);
-
-        CN_STEP3(0, ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP3(1, ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP3(2, ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-        CN_STEP3(3, ax3, bx30, bx31, cx3, l3, ptr3, idx3);
-
-        CN_STEP4(0, ax0, bx00, bx01, cx0, l0, mc0, ptr0, idx0);
-        CN_STEP4(1, ax1, bx10, bx11, cx1, l1, mc1, ptr1, idx1);
-        CN_STEP4(2, ax2, bx20, bx21, cx2, l2, mc2, ptr2, idx2);
-        CN_STEP4(3, ax3, bx30, bx31, cx3, l3, mc3, ptr3, idx3);
+        __m128i cx;
+        __m128i cx1; 
+        __m128i cx2; 
+        __m128i cx3; 
+        __m128i ax0 = _mm_set_epi64x(ah0, al0);
+        __m128i ax1 = _mm_set_epi64x(ah1, al1);
+        __m128i ax2 = _mm_set_epi64x(ah2, al2);
+        __m128i ax3 = _mm_set_epi64x(ah3, al3);
+        ptr0 = state_index(l0[idx0 & 0x1FFFF0]);
+        ptr1 = state_index(l1[idx1 & 0x1FFFF0]);
+        ptr2 = state_index(l2[idx2 & 0x1FFFF0]);
+        ptr3 = state_index(l3[idx3 & 0x1FFFF0]);
+        cx  = _mm_load_si128((__m128i *) &l0[idx0 & 0x1FFFF0]);
+        cx1 = _mm_load_si128((__m128i *) &l1[idx1 & 0x1FFFF0]);
+        cx2 = _mm_load_si128((__m128i *) &l2[idx2 & 0x1FFFF0]);
+        cx3 = _mm_load_si128((__m128i *) &l3[idx3 & 0x1FFFF0]);
+        cx  = SOFT_AES?soft_aesenc(cx,  ax0):_mm_aesenc_si128(cx,  ax0); 
+        cx1 = SOFT_AES?soft_aesenc(cx1, ax1):_mm_aesenc_si128(cx1, ax1); 
+        cx2 = SOFT_AES?soft_aesenc(cx2, ax2):_mm_aesenc_si128(cx2, ax2); 
+        cx3 = SOFT_AES?soft_aesenc(cx3, ax3):_mm_aesenc_si128(cx3, ax3); 
+        _mm_store_si128(R128(ca), cx);  
+        _mm_store_si128(R128(cb), cx1);  
+        _mm_store_si128(R128(cc), cx2);  
+        _mm_store_si128(R128(cd), cx3);  
+        _mm_store_si128(R128(ca1), _mm_load_si128(R128(ptr0))); 
+        _mm_store_si128(R128(cb1), _mm_load_si128(R128(ptr1))); 
+        _mm_store_si128(R128(cc1), _mm_load_si128(R128(ptr2))); 
+        _mm_store_si128(R128(cd1), _mm_load_si128(R128(ptr3))); 
+        ptr0 = state_index(ca); 
+        ptr1 = state_index(cb); 
+        ptr2 = state_index(cc); 
+        ptr3 = state_index(cd); 
+        ca[0] ^= al0; ca[1] ^= ah0; 
+        cb[0] ^= al1; cb[1] ^= ah1; 
+        cc[0] ^= al2; cc[1] ^= ah2; 
+        cd[0] ^= al3; cd[1] ^= ah3; 
+        _mm_store_si128((__m128i *)ptr0,_mm_load_si128(R128(ca))); 
+        _mm_store_si128((__m128i *)ptr1,_mm_load_si128(R128(cb))); 
+        _mm_store_si128((__m128i *)ptr2,_mm_load_si128(R128(cc))); 
+        _mm_store_si128((__m128i *)ptr3,_mm_load_si128(R128(cd))); 
+        ptr0 = state_index(ca);
+        ptr1 = state_index(cb);
+        ptr2 = state_index(cc);
+        ptr3 = state_index(cd);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1)));
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr2, _mm_load_si128(R128(cc1))); 
+        _mm_store_si128((__m128i *)ptr3, _mm_load_si128(R128(cd1))); 
+        ca1[0] ^= ca[0]; ca1[1] ^= ca[1];
+        cb1[0] ^= cb[0]; cb1[1] ^= cb[1];
+        cc1[0] ^= cc[0]; cc1[1] ^= cc[1];
+        cd1[0] ^= cd[0]; cd1[1] ^= cd[1];
+        ptr0 = state_index(ca1);
+        ptr1 = state_index(cb1);
+        ptr2 = state_index(cc1);
+        ptr3 = state_index(cd1);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1))); 
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr2, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr3, _mm_load_si128(R128(cb1))); 
+        uint64_t cl0, ch0;
+        uint64_t cl1, ch1;
+        uint64_t cl2, ch2;
+        uint64_t cl3, ch3;
+        cl0 = ((uint64_t*)ptr0)[0];  
+        cl1 = ((uint64_t*)ptr1)[0];  
+        cl2 = ((uint64_t*)ptr2)[0];  
+        cl3 = ((uint64_t*)ptr3)[0]; 
+        ch0 = ((uint64_t*)ptr0)[1];
+        ch1 = ((uint64_t*)ptr1)[1];
+        ch2 = ((uint64_t*)ptr2)[1];
+        ch3 = ((uint64_t*)ptr3)[1];
+        ((uint64_t*)ptr0)[0] = al0; 
+        ((uint64_t*)ptr1)[0] = al1; 
+        ((uint64_t*)ptr2)[0] = al2; 
+        ((uint64_t*)ptr3)[0] = al3; 
+        ((uint64_t*)ptr0)[1] = ah0; 
+        ((uint64_t*)ptr1)[1] = ah1; 
+        ((uint64_t*)ptr2)[1] = ah2; 
+        ((uint64_t*)ptr3)[1] = ah3; 
+        al0 ^= cl0;  
+        al1 ^= cl1; 
+        al2 ^= cl2; 
+        al3 ^= cl3; 
+        ah0 ^= ch0; 
+        ah1 ^= ch1; 
+        ah2 ^= ch2; 
+        ah3 ^= ch3; 
+        ax0 = _mm_set_epi64x(ah0, al0); 
+        ax1 = _mm_set_epi64x(ah1, al1);
+        ax2 = _mm_set_epi64x(ah2, al2); 
+        ax3 = _mm_set_epi64x(ah3, al3); 
+        idx0 = al0;
+        idx1 = al1;
+        idx2 = al2;
+        idx3 = al3;
     }
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l0, (__m128i*) ctx[0]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l1, (__m128i*) ctx[1]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l2, (__m128i*) ctx[2]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l3, (__m128i*) ctx[3]->state);
 
-    for (size_t i = 0; i < 4; i++) {
-        cn_implode_scratchpad<ALGO, MEM, SOFT_AES>(reinterpret_cast<__m128i*>(ctx[i]->memory), reinterpret_cast<__m128i*>(ctx[i]->state));
-        xmrig::keccakf(reinterpret_cast<uint64_t*>(ctx[i]->state), 24);
-        extra_hashes[ctx[i]->state[0] & 3](ctx[i]->state, 200, output + 32 * i);
-    }
+    xmrig::keccakf(h0, 24);
+    xmrig::keccakf(h1, 24);
+    xmrig::keccakf(h2, 24);
+    xmrig::keccakf(h3, 24);
+    extra_hashes[ctx[0]->state[0] & 3](ctx[0]->state, 200, output);
+    extra_hashes[ctx[1]->state[0] & 3](ctx[1]->state, 200, output+32);
+    extra_hashes[ctx[2]->state[0] & 3](ctx[2]->state, 200, output+64);
+    extra_hashes[ctx[3]->state[0] & 3](ctx[3]->state, 200, output+96);
 }
 
 
 template<xmrig::Algo ALGO, bool SOFT_AES, xmrig::Variant VARIANT>
 inline void cryptonight_penta_hash(const uint8_t *__restrict__ input, size_t size, uint8_t *__restrict__ output, cryptonight_ctx **__restrict__ ctx)
 {
-    constexpr size_t MASK       = xmrig::cn_select_mask<ALGO>();
-    constexpr size_t ITERATIONS = xmrig::cn_select_iter<ALGO, VARIANT>();
-    constexpr size_t MEM        = xmrig::cn_select_memory<ALGO>();
-    constexpr bool IS_V1        = xmrig::cn_base_variant<VARIANT>() == xmrig::VARIANT_1;
+    xmrig::keccak(input       , size, ctx[0]->state);
+    xmrig::keccak(input+  size, size, ctx[1]->state);
+    xmrig::keccak(input+2*size, size, ctx[2]->state);
+    xmrig::keccak(input+3*size, size, ctx[3]->state);
+    xmrig::keccak(input+4*size, size, ctx[4]->state);
 
-    if (IS_V1 && size < 43) {
-        memset(output, 0, 32 * 5);
-        return;
-    }
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[0]->state, (__m128i*) ctx[0]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[1]->state, (__m128i*) ctx[1]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[2]->state, (__m128i*) ctx[2]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[3]->state, (__m128i*) ctx[3]->memory);
+    cn_explode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) ctx[4]->state, (__m128i*) ctx[4]->memory);
 
-    for (size_t i = 0; i < 5; i++) {
-        xmrig::keccak(input + size * i, size, ctx[i]->state);
-        cn_explode_scratchpad<ALGO, MEM, SOFT_AES>(reinterpret_cast<__m128i*>(ctx[i]->state), reinterpret_cast<__m128i*>(ctx[i]->memory));
-    }
-
-    uint8_t* l0  = ctx[0]->memory;
-    uint8_t* l1  = ctx[1]->memory;
-    uint8_t* l2  = ctx[2]->memory;
-    uint8_t* l3  = ctx[3]->memory;
-    uint8_t* l4  = ctx[4]->memory;
+    const uint8_t* l0 = ctx[0]->memory;
+    const uint8_t* l1 = ctx[1]->memory;
+    const uint8_t* l2 = ctx[2]->memory;
+    const uint8_t* l3 = ctx[3]->memory;
+    const uint8_t* l4 = ctx[3]->memory;
     uint64_t* h0 = reinterpret_cast<uint64_t*>(ctx[0]->state);
     uint64_t* h1 = reinterpret_cast<uint64_t*>(ctx[1]->state);
     uint64_t* h2 = reinterpret_cast<uint64_t*>(ctx[2]->state);
     uint64_t* h3 = reinterpret_cast<uint64_t*>(ctx[3]->state);
-    uint64_t* h4 = reinterpret_cast<uint64_t*>(ctx[4]->state);
+    uint64_t* h4 = reinterpret_cast<uint64_t*>(ctx[3]->state);
 
-    CONST_INIT(ctx[0], 0);
-    CONST_INIT(ctx[1], 1);
-    CONST_INIT(ctx[2], 2);
-    CONST_INIT(ctx[3], 3);
-    CONST_INIT(ctx[4], 4);
-    VARIANT2_SET_ROUNDING_MODE();
+    uint64_t ca[2], ca1[2]; 
+    uint64_t cb[2], cb1[2]; 
+    uint64_t cc[2], cc1[2]; 
+    uint64_t cd[2], cd1[2]; 
+    uint64_t ce[2], ce1[2]; 
+    uint64_t al0 = h0[0] ^ h0[4];
+    uint64_t ah0 = h0[1] ^ h0[5];
+    uint64_t al1 = h1[0] ^ h1[4];
+    uint64_t ah1 = h1[1] ^ h1[5];
+    uint64_t al2 = h2[0] ^ h2[4];
+    uint64_t ah2 = h2[1] ^ h2[5];
+    uint64_t al3 = h3[0] ^ h3[4];
+    uint64_t ah3 = h3[1] ^ h3[5];
+    uint64_t al4 = h4[0] ^ h4[4];
+    uint64_t ah4 = h4[1] ^ h4[5];
 
-    uint64_t idx0, idx1, idx2, idx3, idx4;
-    idx0 = _mm_cvtsi128_si64(ax0);
-    idx1 = _mm_cvtsi128_si64(ax1);
-    idx2 = _mm_cvtsi128_si64(ax2);
-    idx3 = _mm_cvtsi128_si64(ax3);
-    idx4 = _mm_cvtsi128_si64(ax4);
+    uint64_t idx0 = al0;
+    uint64_t idx1 = al1;
+    uint64_t idx2 = al2;
+    uint64_t idx3 = al3;
+    uint64_t idx4 = al4;
+    size_t ptr0;
+    size_t ptr1;
+    size_t ptr2;
+    size_t ptr3;
+    size_t ptr4;
 
-    for (size_t i = 0; i < ITERATIONS; i++)
+    for(size_t i = 0; i < 0x200000; i++)
     {
-        uint64_t hi, lo;
-        __m128i *ptr0, *ptr1, *ptr2, *ptr3, *ptr4;
-
-        CN_STEP1(ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP1(ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP1(ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-        CN_STEP1(ax3, bx30, bx31, cx3, l3, ptr3, idx3);
-        CN_STEP1(ax4, bx40, bx41, cx4, l4, ptr4, idx4);
-
-        CN_STEP2(ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP2(ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP2(ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-        CN_STEP2(ax3, bx30, bx31, cx3, l3, ptr3, idx3);
-        CN_STEP2(ax4, bx40, bx41, cx4, l4, ptr4, idx4);
-
-        CN_STEP3(0, ax0, bx00, bx01, cx0, l0, ptr0, idx0);
-        CN_STEP3(1, ax1, bx10, bx11, cx1, l1, ptr1, idx1);
-        CN_STEP3(2, ax2, bx20, bx21, cx2, l2, ptr2, idx2);
-        CN_STEP3(3, ax3, bx30, bx31, cx3, l3, ptr3, idx3);
-        CN_STEP3(4, ax4, bx40, bx41, cx4, l4, ptr4, idx4);
-
-        CN_STEP4(0, ax0, bx00, bx01, cx0, l0, mc0, ptr0, idx0);
-        CN_STEP4(1, ax1, bx10, bx11, cx1, l1, mc1, ptr1, idx1);
-        CN_STEP4(2, ax2, bx20, bx21, cx2, l2, mc2, ptr2, idx2);
-        CN_STEP4(3, ax3, bx30, bx31, cx3, l3, mc3, ptr3, idx3);
-        CN_STEP4(4, ax4, bx40, bx41, cx4, l4, mc4, ptr4, idx4);
+        __m128i cx;
+        __m128i cx1; 
+        __m128i cx2; 
+        __m128i cx3; 
+        __m128i cx4; 
+        __m128i ax0 = _mm_set_epi64x(ah0, al0);
+        __m128i ax1 = _mm_set_epi64x(ah1, al1);
+        __m128i ax2 = _mm_set_epi64x(ah2, al2);
+        __m128i ax3 = _mm_set_epi64x(ah3, al3);
+        __m128i ax4 = _mm_set_epi64x(ah4, al4);
+        ptr0 = state_index(l0[idx0 & 0x1FFFF0]);
+        ptr1 = state_index(l1[idx1 & 0x1FFFF0]);
+        ptr2 = state_index(l2[idx2 & 0x1FFFF0]);
+        ptr3 = state_index(l3[idx3 & 0x1FFFF0]);
+        ptr4 = state_index(l4[idx4 & 0x1FFFF0]);
+        cx  = _mm_load_si128((__m128i *) &l0[idx0 & 0x1FFFF0]);
+        cx1 = _mm_load_si128((__m128i *) &l1[idx1 & 0x1FFFF0]);
+        cx2 = _mm_load_si128((__m128i *) &l2[idx2 & 0x1FFFF0]);
+        cx3 = _mm_load_si128((__m128i *) &l3[idx3 & 0x1FFFF0]);
+        cx4 = _mm_load_si128((__m128i *) &l4[idx4 & 0x1FFFF0]);
+        cx  = SOFT_AES?soft_aesenc(cx,  ax0):_mm_aesenc_si128(cx,  ax0); 
+        cx1 = SOFT_AES?soft_aesenc(cx1, ax1):_mm_aesenc_si128(cx1, ax1); 
+        cx2 = SOFT_AES?soft_aesenc(cx2, ax2):_mm_aesenc_si128(cx2, ax2); 
+        cx3 = SOFT_AES?soft_aesenc(cx3, ax3):_mm_aesenc_si128(cx3, ax3); 
+        cx4 = SOFT_AES?soft_aesenc(cx4, ax4):_mm_aesenc_si128(cx4, ax4); 
+        _mm_store_si128(R128(ca), cx);  
+        _mm_store_si128(R128(cb), cx1);  
+        _mm_store_si128(R128(cc), cx2);  
+        _mm_store_si128(R128(cd), cx3);  
+        _mm_store_si128(R128(ce), cx4);  
+        _mm_store_si128(R128(ca1), _mm_load_si128(R128(ptr0))); 
+        _mm_store_si128(R128(cb1), _mm_load_si128(R128(ptr1))); 
+        _mm_store_si128(R128(cc1), _mm_load_si128(R128(ptr2))); 
+        _mm_store_si128(R128(cd1), _mm_load_si128(R128(ptr3))); 
+        _mm_store_si128(R128(ce1), _mm_load_si128(R128(ptr4))); 
+        ptr0 = state_index(ca); 
+        ptr1 = state_index(cb); 
+        ptr2 = state_index(cc); 
+        ptr3 = state_index(cd); 
+        ptr3 = state_index(ce); 
+        ca[0] ^= al0; ca[1] ^= ah0; 
+        cb[0] ^= al1; cb[1] ^= ah1; 
+        cc[0] ^= al2; cc[1] ^= ah2; 
+        cd[0] ^= al3; cd[1] ^= ah3; 
+        ce[0] ^= al4; cd[1] ^= ah4; 
+        _mm_store_si128((__m128i *)ptr0,_mm_load_si128(R128(ca))); 
+        _mm_store_si128((__m128i *)ptr1,_mm_load_si128(R128(cb))); 
+        _mm_store_si128((__m128i *)ptr2,_mm_load_si128(R128(cc))); 
+        _mm_store_si128((__m128i *)ptr3,_mm_load_si128(R128(cd))); 
+        _mm_store_si128((__m128i *)ptr4,_mm_load_si128(R128(ce))); 
+        ptr0 = state_index(ca);
+        ptr1 = state_index(cb);
+        ptr2 = state_index(cc);
+        ptr3 = state_index(cd);
+        ptr4 = state_index(ce);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1)));
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr2, _mm_load_si128(R128(cc1))); 
+        _mm_store_si128((__m128i *)ptr3, _mm_load_si128(R128(cd1))); 
+        _mm_store_si128((__m128i *)ptr4, _mm_load_si128(R128(ce1))); 
+        ca1[0] ^= ca[0]; ca1[1] ^= ca[1];
+        cb1[0] ^= cb[0]; cb1[1] ^= cb[1];
+        cc1[0] ^= cc[0]; cc1[1] ^= cc[1];
+        cd1[0] ^= cd[0]; cd1[1] ^= cd[1];
+        ce1[0] ^= ce[0]; ce1[1] ^= ce[1];
+        ptr0 = state_index(ca1);
+        ptr1 = state_index(cb1);
+        ptr2 = state_index(cb1);
+        ptr3 = state_index(cb1);
+        ptr4 = state_index(cb1);
+        _mm_store_si128((__m128i *)ptr0, _mm_load_si128(R128(ca1))); 
+        _mm_store_si128((__m128i *)ptr1, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr2, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr3, _mm_load_si128(R128(cb1))); 
+        _mm_store_si128((__m128i *)ptr4, _mm_load_si128(R128(cb1))); 
+        uint64_t cl0, ch0;
+        uint64_t cl1, ch1;
+        uint64_t cl2, ch2;
+        uint64_t cl3, ch3;
+        uint64_t cl4, ch4;
+        cl0 = ((uint64_t*)ptr0)[0];  
+        cl1 = ((uint64_t*)ptr1)[0];  
+        cl2 = ((uint64_t*)ptr2)[0];  
+        cl3 = ((uint64_t*)ptr3)[0];  
+        cl4 = ((uint64_t*)ptr4)[0]; 
+        ch0 = ((uint64_t*)ptr0)[1];
+        ch1 = ((uint64_t*)ptr1)[1];
+        ch2 = ((uint64_t*)ptr2)[1];
+        ch3 = ((uint64_t*)ptr3)[1];
+        ch4 = ((uint64_t*)ptr4)[1];
+        ((uint64_t*)ptr0)[0] = al0; 
+        ((uint64_t*)ptr1)[0] = al1; 
+        ((uint64_t*)ptr2)[0] = al2; 
+        ((uint64_t*)ptr3)[0] = al3; 
+        ((uint64_t*)ptr4)[0] = al4; 
+        ((uint64_t*)ptr0)[1] = ah0; 
+        ((uint64_t*)ptr1)[1] = ah1; 
+        ((uint64_t*)ptr2)[1] = ah2; 
+        ((uint64_t*)ptr3)[1] = ah3; 
+        ((uint64_t*)ptr4)[1] = ah4; 
+        al0 ^= cl0;  
+        al1 ^= cl1; 
+        al2 ^= cl2; 
+        al3 ^= cl3; 
+        al4 ^= cl4; 
+        ah0 ^= ch0; 
+        ah1 ^= ch1; 
+        ah2 ^= ch2; 
+        ah3 ^= ch3; 
+        ah4 ^= ch4; 
+        ax0 = _mm_set_epi64x(ah0, al0); 
+        ax1 = _mm_set_epi64x(ah1, al1);
+        ax2 = _mm_set_epi64x(ah2, al2); 
+        ax3 = _mm_set_epi64x(ah3, al3); 
+        ax4 = _mm_set_epi64x(ah4, al4); 
+        idx0 = al0;
+        idx1 = al1;
+        idx2 = al2;
+        idx3 = al3;
+        idx4 = al4;
     }
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l0, (__m128i*) ctx[0]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l1, (__m128i*) ctx[1]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l2, (__m128i*) ctx[2]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l3, (__m128i*) ctx[3]->state);
+    cn_implode_scratchpad<ALGO, 2097152, SOFT_AES>((__m128i*) l4, (__m128i*) ctx[4]->state);
 
-    for (size_t i = 0; i < 5; i++) {
-        cn_implode_scratchpad<ALGO, MEM, SOFT_AES>(reinterpret_cast<__m128i*>(ctx[i]->memory), reinterpret_cast<__m128i*>(ctx[i]->state));
-        xmrig::keccakf(reinterpret_cast<uint64_t*>(ctx[i]->state), 24);
-        extra_hashes[ctx[i]->state[0] & 3](ctx[i]->state, 200, output + 32 * i);
-    }
+    xmrig::keccakf(h0, 24);
+    xmrig::keccakf(h1, 24);
+    xmrig::keccakf(h2, 24);
+    xmrig::keccakf(h3, 24);
+    xmrig::keccakf(h4, 24);
+    extra_hashes[ctx[0]->state[0] & 3](ctx[0]->state, 200, output);
+    extra_hashes[ctx[1]->state[0] & 3](ctx[1]->state, 200, output+32);
+    extra_hashes[ctx[2]->state[0] & 3](ctx[2]->state, 200, output+64);
+    extra_hashes[ctx[3]->state[0] & 3](ctx[3]->state, 200, output+96);
+    extra_hashes[ctx[4]->state[0] & 3](ctx[4]->state, 200, output+128);
 }
 
 #endif /* XMRIG_CRYPTONIGHT_X86_H */
